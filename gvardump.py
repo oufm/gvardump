@@ -178,16 +178,34 @@ class Lexer(object):
             else:
                 return Symbol(symbol_str)
         else:
-            raise Exception("unsupported token at column %d: '%s'" %
-                            (self.pos, self.text[self.pos:]))
+            raise Exception("unsupported token at column %d: %s" %
+                            (self.pos + 1, self.get_pos_tip(self.pos)))
 
     def next_token_expect(self, expect_cls):
         token = self.next_token()
         if not isinstance(token, expect_cls):
             self.backward()
-            raise Exception("expect %s, but get '%s'" %
-                            (expect_cls.__name__, token))
+            expect_name = expect_cls.__name__.upper()
+            try:
+                expect_name = "'%s'" % str(expect_cls())
+            except:
+                pass
+            raise Exception("expect %s at column %d, but get '%s' %s" %
+                            (expect_name, self.pos + 1, token,
+                             self.get_pos_tip(self.pos)))
         return token
+
+    def get_pos_tip(self, pos):
+        while pos < len(self.text) and self.text[pos].isspace():
+            pos += 1
+        return '\n' + self.text + '\n' + ' ' * pos + '^' + '\n'
+
+    def error_with_last_pos(self, message):
+        if self.pos_history:
+            column = self.pos_history[-1]
+            message = 'error at column %d: ' % (column + 1) + \
+                self.get_pos_tip(column) + message
+        return Exception(message)
 
     def __enter__(self):
         self.archived_pos = self.pos
@@ -200,12 +218,15 @@ class Lexer(object):
 
 
 class Dereference(AST):
-    def __init__(self, variable, member):
+    def __init__(self, variable, member=None):
         self.variable = variable
         self.member = member
 
     def __str__(self):
-        return '(%s)->%s' % (self.variable, self.member)
+        if self.member:
+            return '(%s)->%s' % (self.variable, self.member)
+        else:
+            return '*%s' % self.variable
 
 
 class Access(AST):
@@ -218,17 +239,19 @@ class Access(AST):
 
 
 class Typecast(AST):
-    def __init__(self, variable, new_type, ref_level, keyword):
+    def __init__(self, variable, new_type, ref_level, keyword, indexes):
         self.variable = variable
         self.new_type = new_type
         self.ref_level = ref_level
         self.keyword = keyword
+        self.indexes = indexes
 
     @property
     def type_str(self):
-        return '%s%s%s' % ('%s ' % self.keyword if self.keyword else '',
-                           self.new_type,
-                           '*' * self.ref_level)
+        return (self.keyword + ' ' if self.keyword else '') + \
+                    self.new_type + ' ' + \
+                    '*' * self.ref_level + \
+                    ''.join(['[%d]' % i for i in self.indexes])
 
     def __str__(self):
         return '((%s)%s)' % (self.type_str, self.variable)
@@ -245,9 +268,9 @@ class Index(AST):
 
 class Parser(object):
     """
-    expr: (LPAREN (STRUCT)? SYMBOL (\*)* RPAREN)? term
-    term: variable (LSQUARE NUMBER RSQUARE | DOT SYMBLE | RARROW SYMBLE)*
-    variable: SYMBLE | NUMBER | LPAREN expr RPAREN
+    expr: (LPAREN (STRUCT)? SYMBOL (ASTERISK)* (LSQUARE NUMBER RSQUARE)* RPAREN)? term
+    term: (ASTERISK term) | variable (LSQUARE NUMBER RSQUARE | DOT SYMBOL | RARROW SYMBOL)*
+    variable: SYMBOL | NUMBER | LPAREN expr RPAREN
     """
     def __init__(self, lexer):
         self.lexer = lexer
@@ -256,8 +279,8 @@ class Parser(object):
         expr = self.parse_expr()
         token = self.lexer.next_token()
         if token:
-            raise Exception("extra token '%s' after expression '%s'" %
-                            (token, expr))
+            raise self.lexer.error_with_last_pos(
+                "unexpected token '%s' after expression '%s'" % (token, expr))
         return expr
 
     @log_arg_ret
@@ -266,6 +289,7 @@ class Parser(object):
         try:
             with self.lexer:
                 keyword = ''
+                indexes = []
                 ref_level = 0
                 self.lexer.next_token_expect(Lparen)
                 token = self.lexer.next_token()
@@ -275,8 +299,8 @@ class Parser(object):
                 elif isinstance(token, Symbol):
                     symbol = token
                 else:
-                    raise Exception("expect 'struct' or symbol, but get '%s'"
-                                    % token)
+                    raise self.lexer.error_with_last_pos(
+                        "expect 'struct' or symbol, but get '%s'" % token)
 
                 token = self.lexer.next_token()
                 while token:
@@ -284,14 +308,19 @@ class Parser(object):
                         break
                     elif isinstance(token, Asterisk):
                         ref_level += 1
+                    elif isinstance(token, Lsquare):
+                        indexes.append(
+                            self.lexer.next_token_expect(Number).value)
+                        self.lexer.next_token_expect(Rsquare)
                     else:
-                        raise Exception("expect '*' or ')', but get '%s'",
-                                        token)
+                        raise self.lexer.error_with_last_pos(
+                            "expect '*' or ')', but get '%s'", token)
                     token = self.lexer.next_token()
                 if not isinstance(token, Rparen):
-                    raise Exception("typecast missing ')'")
+                    raise self.lexer.error_with_last_pos(
+                        "typecast missing ')'")
                 term = self.parse_term()
-                return Typecast(term, str(symbol), ref_level, keyword)
+                return Typecast(term, str(symbol), ref_level, keyword, indexes)
         except:
             pass
 
@@ -300,6 +329,11 @@ class Parser(object):
 
     @log_arg_ret
     def parse_term(self):
+        token = self.lexer.next_token()
+        if isinstance(token, Asterisk):
+            return Dereference(self.parse_term())
+
+        self.lexer.backward()
         term = self.parse_variable()
         token = self.lexer.next_token()
         while token:
@@ -328,8 +362,8 @@ class Parser(object):
             self.lexer.next_token_expect(Rparen)
             return expr
         else:
-            raise Exception("expect symbol, number or expression, "
-                            "but get '%s'" % token)
+            raise self.lexer.error_with_last_pos(
+                "expect symbol, number or expression, but get '%s'" % token)
 
 
 def read_timeout(fp, timeout=1, size=1024*1024):
@@ -439,30 +473,45 @@ class Dumper(object):
         #     raise Exception("type '%s' has no member '%s', ptype: %s" %
         #                     type_str, member, output)
         # member_type = match.group(1) + (match.group(4) if match.group(4) else '')
-        output = self.gdb_shell.run_cmd('p &((%s *)0)->%s' %
-                                        (type_str, member))
-        pos1 = output.index('=')
-        pos2 = output.index('0x')
-        member_type = self.simplify_type(output[pos1 + 1:pos2])
-        offset_str = output[pos2:].strip().split()[0]
-        member_offset = int(offset_str, 0)
-        return member_offset, self.derefrence_type(member_type)[0]
+        try:
+            output = self.gdb_shell.run_cmd('p &((%s *)0)->%s' %
+                                            (type_str, member))
+            pos1 = output.index('=')
+            pos2 = output.index('0x')
+            member_type = self.simplify_type(output[pos1 + 1:pos2])
+            offset_str = output[pos2:].strip().split()[0]
+            member_offset = int(offset_str, 0)
+            return member_offset, self.derefrence_type(member_type)[0]
+        except Exception as e:
+            log_exception()
+            raise Exception("failed to get offset(%s, %s): %s" %
+                            (type_str, member, str(e)))
 
     @log_arg_ret
     def get_symbol_address_and_type(self, symbol_str):
-        output = self.gdb_shell.run_cmd('p &%s' % symbol_str)
-        pos1 = output.index('=')
-        pos2 = output.index('0x')
-        symbol_type = self.simplify_type(output[pos1 + 1:pos2])
-        symbol_offset = int(output[pos2:].strip().split()[0], 0)
-        return symbol_offset + self.base_addr, \
-            self.derefrence_type(symbol_type)[0]
+        try:
+            output = self.gdb_shell.run_cmd('p &%s' % symbol_str)
+            pos1 = output.index('=')
+            pos2 = output.index('0x')
+            symbol_type = self.simplify_type(output[pos1 + 1:pos2])
+            symbol_offset = int(output[pos2:].strip().split()[0], 0)
+            return symbol_offset + self.base_addr, \
+                self.derefrence_type(symbol_type)[0]
+        except Exception as e:
+            log_exception()
+            raise Exception("failed to get address of symbol '%s': %s" %
+                            (symbol_str, str(e)))
 
     @log_arg_ret
     def get_type_size(self, type_str):
-        output = self.gdb_shell.run_cmd('p sizeof(%s)' % type_str)
-        pos = output.index('=')
-        return int(output[pos + 1:].strip().split()[0], 0)
+        try:
+            output = self.gdb_shell.run_cmd('p sizeof(%s)' % type_str)
+            pos = output.index('=')
+            return int(output[pos + 1:].strip().split()[0], 0)
+        except Exception as e:
+            log_exception()
+            raise Exception("failed to get size of '%s': %s" %
+                            (type_str, str(e)))
 
     @log_arg_ret
     def dereference_addr(self, address):
@@ -482,16 +531,14 @@ class Dumper(object):
 
         # example: 'struct _43rdewd ** [43] [5]'
         match = re.match(r'^(\w+\s+)?\w+\s*(\*)*\s*(\[\d+\])?', type_str)
-        if not match:
-            raise Exception("invalid type '%s'" % type_str)
-        _, group2, group3 = match.groups()
-        if group3:
-            return type_str.replace(group3, '', 1).strip(), group3
-        elif group2:
-            return type_str.replace(group2, '', 1).strip(), group2
-        else:
-            raise Exception("type '%s' is not array or pointer, "
-                            "can't derefrence", type_str)
+        if match:
+            _, group2, group3 = match.groups()
+            if group3:
+                return type_str.replace(group3, '', 1).strip(), group3
+            elif group2:
+                return type_str.replace(group2, '', 1).strip(), group2
+        raise Exception("type '%s' is neither array nor pointer, "
+                        "can't derefrence it", type_str)
 
     @log_arg_ret
     def get_addr_and_type(self, expr):
@@ -503,23 +550,38 @@ class Dumper(object):
             if '*' in type_str:
                 raise Exception("type of '%s' is '%s', '->' "
                                 "should be used instead of '.'" %
-                                (expr, type_str))
+                                (expr.variable, type_str))
+            if '[' in type_str:
+                raise Exception("type of '%s' is '%s', not a struct, "
+                                "'.' is not allowed" %
+                                (expr.variable, type_str))
             offset, type_str = self.get_member_offset_and_type(
                 type_str, expr.member)
             return addr + offset, type_str
         elif isinstance(expr, Dereference):
             addr, type_str = self.get_addr_and_type(expr.variable)
             if '*' not in type_str:
-                raise Exception("type of '%s' is '%s', '.' "
-                                "should be used instead of '->'" %
-                                (expr, type_str))
+                if expr.member:
+                    raise Exception("type of '%s' is '%s', '.' "
+                                    "should be used instead of '->'" %
+                                    (expr.variable, type_str))
+                else:
+                    raise Exception("type of '%s' is '%s', not a pointer, "
+                                    "'*' is not allowed" %
+                                    (expr.variable, type_str))
             type_str = self.derefrence_type(type_str)[0]
             addr = self.dereference_addr(addr)
-            offset, type_str = self.get_member_offset_and_type(
-                type_str, expr.member)
+            offset = 0
+            if expr.member:
+                offset, type_str = self.get_member_offset_and_type(
+                    type_str, expr.member)
             return addr + offset, type_str
         elif isinstance(expr, Index):
             addr, type_str = self.get_addr_and_type(expr.variable)
+            if '*' not in type_str and '[' not in type_str:
+                raise Exception("type of '%s' is '%s', neither pointer "
+                                "nor array, index is not allowed" %
+                                (expr.variable, type_str))
             type_str, popped = self.derefrence_type(type_str)
             if '*' in popped:
                 # index a pointer instead of array
@@ -580,9 +642,14 @@ class Dumper(object):
             dump_txt += indent * self.BLANK + '}'
             return dump_txt
 
-        type_desc = self.gdb_shell.run_cmd('ptype %s' % type_str)
-        pos = type_desc.index('=')
-        type_desc = type_desc[pos + 1:].strip().splitlines()
+        try:
+            type_desc = self.gdb_shell.run_cmd('ptype %s' % type_str)
+            pos = type_desc.index('=')
+            type_desc = type_desc[pos + 1:].strip().splitlines()
+        except Exception as e:
+            log_exception()
+            raise Exception("failed to get type of '%s': %s" %
+                            (type_str, str(e)))
 
         # dump basic type
         if len(type_desc) == 1:
@@ -654,18 +721,19 @@ class Dumper(object):
         return "%s = %s;" % (expr, self.dump_type(data, type_str, indent=0))
 
 
-
 if __name__ == '__main__':
-    epilog = """example:
-    * type of g_var1 is 'struct foo**', dump the referenced struct:
-        %(prog)s 32311 'g_var1[2][0]'
-    * dump the nested struct:
-        %(prog)s 32311 'g_var2->val.data'
-    * dump data at specified address:
-        %(prog)s 32311 '((struct foo*)0x556159b32020)[0]'
+    epilog = """examples:
+    * type of g_var1 is 'struct foo**', dump the second struct:
+        %(prog)s 32311 '*g_var1[2]'
+    * type of g_var2 is 'struct foo*', dump the first 5 elements:
+        %(prog)s 32311 '(struct foo[5])*g_var2'
+    * g_var3 points to a nested struct, dump the member:
+        %(prog)s 32311 'g_var3->val.data'
+    * there is a 'struct foo' at address 0x556159b32020, dump it:
+        %(prog)s 32311 '(struct foo)0x556159b32020'
     """ % {'prog': sys.argv[0]}
     parser = argparse.ArgumentParser(
-        description='dump global variables of a process without interruption it',
+        description='dump global variables of a living process without interruption it',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog)
     parser.add_argument('pid', type=int, help='target process ID')
@@ -683,9 +751,17 @@ if __name__ == '__main__':
                         help='displayed maximum string length')
     args = parser.parse_args()
     verbose = args.verbose
-    lexer = Lexer(args.expression)
-    parser = Parser(lexer)
-    expr = parser.parse()
-    dumper = Dumper(args.pid, args.array_max, args.string_max,
-                    args.hex_string, args.elf_path)
-    print(dumper.dump(expr))
+    try:
+        lexer = Lexer(args.expression)
+        parser = Parser(lexer)
+        expr = parser.parse()
+        dumper = Dumper(args.pid, args.array_max, args.string_max,
+                        args.hex_string, args.elf_path)
+        print(dumper.dump(expr))
+    except Exception as e:
+        if verbose:
+            raise
+
+        print("dump '%s' failed: %s" % (args.expression, str(e)),
+              file=sys.stderr)
+        exit(-1)
