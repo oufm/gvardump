@@ -248,10 +248,11 @@ class Typecast(AST):
 
     @property
     def type_str(self):
-        return (self.keyword + ' ' if self.keyword else '') + \
-                    self.new_type + ' ' + \
-                    '*' * self.ref_level + \
-                    ''.join(['[%d]' % i for i in self.indexes])
+        ret = (self.keyword + ' ') if self.keyword else ''
+        ret += self.new_type + ' '
+        ret += '*' * self.ref_level
+        ret += ''.join(['[%d]' % i for i in self.indexes])
+        return ret.strip()
 
     def __str__(self):
         return '((%s)%s)' % (self.type_str, self.variable)
@@ -430,11 +431,15 @@ class GdbShell(object):
 class Dumper(object):
     BLANK = '    '
 
-    def __init__(self, pid, array_max, string_max, hex_string, elf_path=None):
+    def __init__(self, pid, array_max, string_max,
+                 array_max_force=False, string_max_force=False,
+                 hex_string=False, elf_path=None):
         exe = os.readlink(
                 os.path.join('/proc', str(pid), 'exe'))
         self.array_max = array_max
         self.string_max = string_max
+        self.array_max_force = array_max_force
+        self.string_max_force = string_max_force
         self.hex_string = hex_string
         self.elf_path = exe
         if elf_path:
@@ -545,21 +550,34 @@ class Dumper(object):
         if isinstance(expr, Typecast):
             addr, _ = self.get_addr_and_type(expr.variable)
             return addr, expr.type_str
+
         elif isinstance(expr, Access):
             addr, type_str = self.get_addr_and_type(expr.variable)
-            if '*' in type_str:
-                raise Exception("type of '%s' is '%s', '->' "
-                                "should be used instead of '.'" %
-                                (expr.variable, type_str))
+            if not type_str:
+                raise Exception("type of '%s' is not specified" %
+                                expr.variable)
             if '[' in type_str:
                 raise Exception("type of '%s' is '%s', not a struct, "
                                 "'.' is not allowed" %
                                 (expr.variable, type_str))
+            if '*' in type_str:
+                raise Exception("type of '%s' is '%s', '->' "
+                                "should be used instead of '.'" %
+                                (expr.variable, type_str))
             offset, type_str = self.get_member_offset_and_type(
                 type_str, expr.member)
             return addr + offset, type_str
+
         elif isinstance(expr, Dereference):
             addr, type_str = self.get_addr_and_type(expr.variable)
+            if not type_str:
+                raise Exception("type of '%s' is not specified" %
+                                expr.variable)
+            if '[' in type_str and '(*)' not in type_str:
+                raise Exception("type of '%s' is '%s', which is an array, "
+                                "not a pointer, '%s' is not allowed" %
+                                (expr.variable, type_str,
+                                 '->' if expr.member else '*'))
             if '*' not in type_str:
                 if expr.member:
                     raise Exception("type of '%s' is '%s', '.' "
@@ -576,8 +594,12 @@ class Dumper(object):
                 offset, type_str = self.get_member_offset_and_type(
                     type_str, expr.member)
             return addr + offset, type_str
+
         elif isinstance(expr, Index):
             addr, type_str = self.get_addr_and_type(expr.variable)
+            if not type_str:
+                raise Exception("type of '%s' is not specified" %
+                                expr.variable)
             if '*' not in type_str and '[' not in type_str:
                 raise Exception("type of '%s' is '%s', neither pointer "
                                 "nor array, index is not allowed" %
@@ -588,101 +610,93 @@ class Dumper(object):
                 addr = self.dereference_addr(addr)
             type_size = self.get_type_size(type_str)
             return addr + type_size * expr.index, type_str
+
         elif isinstance(expr, Symbol):
             return self.get_symbol_address_and_type(expr.value)
+
         elif isinstance(expr, Number):
             return expr.value, ''
 
-    def dump_type(self, data, type_str, indent):
-        dump_txt = ''
-        if '*' in type_str:
-            # dump pointer
-            return '0x%x' % struct.unpack('P', data[:self.arch_size])[0]
+    def dump_byte_array(self, data, array_len, indent):
+        omit_tip = ''
+        if (indent > 0 or self.string_max_force) and \
+                array_len > self.string_max:
+            data = data[:self.string_max]
+            omit_tip = '...'
 
-        # example: 'struct _43rdewd  [43] [5]'
-        match = re.match(r'(^\w+\s+)?\w+\s*\[(\d+)\]', type_str)
-        if match:
-            # dump array
-            type_str = type_str.replace('[%s]' % match.group(2), '')
-            type_size = self.get_type_size(type_str)
-            count = int(match.group(2))
-            omit_count = 0
-            if type_size == 1:
-                # dump byte array
-                omit_tip = ''
-                if indent > 0 and count > self.string_max:
-                    data = data[:self.string_max]
-                    omit_tip = '...'
-                if not self.hex_string:
-                    try:
-                        # dump string
-                        str_val = data.decode('ascii')
-                        return '"%s"' % (str_val + omit_tip)
-                    except:
-                        pass
-                # dump hex
-                return '"<binary>" /* hex: %s */' % \
-                       (codecs.encode(data, 'hex').decode() + omit_tip)
+        if not self.hex_string:
+            try:
+                # dump as string if there is no unprintable character
+                str_val = data.decode('ascii')
+                end = str_val.find('\x00')
+                if end >= 0:
+                    str_val = str_val[:end]
+                if not re.search(r'[^\t-\r\x20-\x7e]', str_val):
+                    return '"%s"' % (str_val + (omit_tip if end < 0 else ''))
+            except:
+                pass
 
-            # dump array in each line
-            if indent > 0 and count > self.array_max:
-                omit_count = count - self.array_max
-                count = self.array_max
-            dump_txt += '{\n'
-            indent += 1
-            for i in range(count):
-                dump_txt += indent * self.BLANK + self.dump_type(
-                    data[type_size * i: type_size * i + type_size],
-                    type_str, indent) + ',\n'
-            if omit_count:
-                dump_txt += indent * self.BLANK + \
-                            '// other %s elements are omit\n' %\
-                            omit_count
-            indent -= 1
-            dump_txt += indent * self.BLANK + '}'
-            return dump_txt
+        # dump as hex
+        return '"<binary>" /* hex: %s */' % \
+               (codecs.encode(data, 'hex').decode() + omit_tip)
 
-        try:
-            type_desc = self.gdb_shell.run_cmd('ptype %s' % type_str)
-            pos = type_desc.index('=')
-            type_desc = type_desc[pos + 1:].strip().splitlines()
-        except Exception as e:
-            log_exception()
-            raise Exception("failed to get type of '%s': %s" %
-                            (type_str, str(e)))
+    def dump_array(self, data, element_type, array_len, indent):
+        type_size = self.get_type_size(element_type)
+        omit_count = 0
+        if type_size == 1:
+            return self.dump_byte_array(data, array_len, indent)
 
-        # dump basic type
-        if len(type_desc) == 1:
-            if 'char' in type_desc[0]:
-                if 'unsigned' in type_desc[0]:
-                    return str(struct.unpack('B', data[0])[0])
-                else:
-                    return str(struct.unpack('b', data[0])[0])
-            elif 'short' in type_desc[0]:
-                if 'unsigned' in type_desc[0]:
-                    return str(struct.unpack('H', data[0:2])[0])
-                else:
-                    return str(struct.unpack('h', data[0:2])[0])
-            elif 'int' in type_desc[0]:
-                if 'unsigned' in type_desc[0]:
-                    return str(struct.unpack('I', data[0:4])[0])
-                else:
-                    return str(struct.unpack('i', data[0:4])[0])
-            elif 'long' in type_desc[0]:
-                if 'unsigned' in type_desc[0]:
-                    return str(struct.unpack('L', data[0:self.arch_size])[0])
-                else:
-                    return str(struct.unpack('l', data[0:self.arch_size])[0])
-            else:
-                return "ERROR /* unsupported type: '%s' */" % \
-                       type_desc[0].strip()
+        # dump array in each line
+        if (indent > 0 or self.array_max_force) and array_len > self.array_max:
+            omit_count = array_len - self.array_max
+            array_len = self.array_max
 
-        # dump struct
-        dump_txt += '{\n'
+        dump_txt = '{\n'
         indent += 1
-        for line in type_desc:
+        for i in range(array_len):
+            dump_txt += indent * self.BLANK + self.dump_type(
+                data[type_size * i: type_size * i + type_size],
+                element_type, indent) + ',\n'
+
+        if omit_count:
+            dump_txt += indent * self.BLANK + \
+                        '// other %s elements are omit\n' % \
+                        omit_count
+        indent -= 1
+        dump_txt += indent * self.BLANK + '}'
+        return dump_txt
+
+    def dump_basic_type(self, data, type_desc):
+        if 'char' in type_desc:
+            if 'unsigned' in type_desc:
+                return str(struct.unpack('B', data[0])[0])
+            else:
+                return str(struct.unpack('b', data[0])[0])
+        elif 'short' in type_desc:
+            if 'unsigned' in type_desc:
+                return str(struct.unpack('H', data[0:2])[0])
+            else:
+                return str(struct.unpack('h', data[0:2])[0])
+        elif 'int' in type_desc:
+            if 'unsigned' in type_desc:
+                return str(struct.unpack('I', data[0:4])[0])
+            else:
+                return str(struct.unpack('i', data[0:4])[0])
+        elif 'long' in type_desc:
+            if 'unsigned' in type_desc:
+                return str(struct.unpack('L', data[0:self.arch_size])[0])
+            else:
+                return str(struct.unpack('l', data[0:self.arch_size])[0])
+        else:
+            return "ERROR /* unsupported type: '%s' */" % type_desc.strip()
+
+    def dump_struct(self, data, type_str, ptype_lines, indent):
+        dump_txt = '{\n'
+        indent += 1
+        for line in ptype_lines:
             if not line or '{' in line or '}' in line:
                 continue
+
             # example: '  struct _43rdewd *foo [43] [5];'
             match = re.match(
                 r'^\s*((\w+\s+)?\w+\s+\**)\s*(\w+)((\s*\[\d+\])*);', line)
@@ -697,9 +711,8 @@ class Dumper(object):
                         type_str, member)
                     member_size = self.get_type_size(member_type)
                     dump_txt += indent * self.BLANK + '.' + member + ' = ' + \
-                                self.dump_type(
-                                    data[offset: offset + member_size],
-                                    member_type, indent) + ',\n'
+                        self.dump_type(data[offset: offset + member_size],
+                                       member_type, indent) + ',\n'
                 except:
                     dump_txt += \
                         indent * self.BLANK + \
@@ -710,8 +723,43 @@ class Dumper(object):
         dump_txt += indent * self.BLANK + '}'
         return dump_txt
 
+    def dump_type(self, data, type_str, indent):
+        if '(*)' in type_str:
+            # dump pointer
+            return '0x%x' % struct.unpack('P', data[:self.arch_size])[0]
+
+        # example: 'struct _43rdewd ** [43] [5]'
+        match = re.match(r'^(\w+\s+)?\w+\s*(\*)*\s*\[(\d+)\]', type_str)
+        if match:
+            # dump array
+            type_str = type_str.replace('[%s]' % match.group(3), '')
+            return self.dump_array(data, type_str, int(match.group(3)), indent)
+
+        if '*' in type_str:
+            # dump pointer
+            return '0x%x' % struct.unpack('P', data[:self.arch_size])[0]
+
+        try:
+            ptype = self.gdb_shell.run_cmd('ptype %s' % type_str)
+            pos = ptype.index('=')
+            ptype_lines = ptype[pos + 1:].strip().splitlines()
+        except Exception as e:
+            log_exception()
+            raise Exception("failed to get type of '%s': %s" %
+                            (type_str, str(e)))
+
+        if len(ptype_lines) == 1:
+            # dump basic type
+            return self.dump_basic_type(data, ptype_lines[0])
+
+        # dump struct
+        return self.dump_struct(data, type_str, ptype_lines, indent)
+
     def dump(self, expr):
         addr, type_str = self.get_addr_and_type(expr)
+        if not type_str:
+            raise Exception("type of '%s' is not specified" % expr)
+
         type_size = self.get_type_size(type_str)
         self.mem_fp.seek(addr)
         try:
@@ -746,18 +794,36 @@ if __name__ == '__main__':
     parser.add_argument('-e', '--elf-path',
                         help='elf path to read symbols, '
                              '`readlink /proc/$pid/exe` by default')
-    parser.add_argument('-a', '--array-max', type=int, default=6,
+    parser.add_argument('-a', '--array-max', type=int, default=0,
                         help='maximum number of elements to display in an array')
-    parser.add_argument('-s', '--string-max', type=int, default=64,
+    parser.add_argument('-s', '--string-max', type=int, default=0,
                         help='displayed maximum string length')
-    args = parser.parse_args()
+    try:
+        args = parser.parse_args()
+    except SystemExit:
+        usage_str = parser.format_usage()
+        help_str = parser.format_help()
+        if help_str.startswith(usage_str) and len(help_str) > len(usage_str):
+            help_str = help_str[len(usage_str):]
+        else:
+            help_str = epilog
+        print(help_str)
+        raise
+
     verbose = args.verbose
+    array_max = args.array_max if args.array_max > 0 else 5
+    string_max = args.string_max if args.string_max > 0 else 64
+    array_max_force = bool(args.array_max > 0)
+    string_max_force = bool(args.string_max > 0)
+
     try:
         lexer = Lexer(args.expression)
         parser = Parser(lexer)
         expr = parser.parse()
-        dumper = Dumper(args.pid, args.array_max, args.string_max,
-                        args.hex_string, args.elf_path)
+        dumper = Dumper(pid=args.pid, elf_path=args.elf_path,
+                        array_max=array_max, array_max_force=array_max_force,
+                        hex_string=args.hex_string, string_max=string_max,
+                        string_max_force=string_max_force)
         print(dumper.dump(expr))
     except Exception as e:
         if verbose:
