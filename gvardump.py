@@ -269,7 +269,7 @@ class Index(AST):
 class Parser(object):
     """
     expr: (LPAREN (STRUCT)? SYMBOL (ASTERISK)* (LSQUARE NUMBER RSQUARE)* RPAREN)? term
-    term: (ASTERISK term) | variable (LSQUARE NUMBER RSQUARE | DOT SYMBOL | RARROW SYMBOL)*
+    term: (ASTERISK expr) | variable (LSQUARE NUMBER RSQUARE | DOT SYMBOL | RARROW SYMBOL)*
     variable: SYMBOL | NUMBER | LPAREN expr RPAREN
     """
     def __init__(self, lexer):
@@ -331,7 +331,7 @@ class Parser(object):
     def parse_term(self):
         token = self.lexer.next_token()
         if isinstance(token, Asterisk):
-            return Dereference(self.parse_term())
+            return Dereference(self.parse_expr())
 
         self.lexer.backward()
         term = self.parse_variable()
@@ -674,7 +674,8 @@ class Dumper(object):
                 else:
                     return str(struct.unpack('l', data[0:self.arch_size])[0])
             else:
-                return "// unsupported type: '%s'" % type_desc[0].strip()
+                return "ERROR /* unsupported type: '%s' */" % \
+                       type_desc[0].strip()
 
         # dump struct
         dump_txt += '{\n'
