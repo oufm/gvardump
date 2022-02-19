@@ -782,7 +782,7 @@ if __name__ == '__main__':
         %(prog)s 32311 '(struct foo)0x556159b32020'
     """ % {'prog': sys.argv[0]}
     parser = argparse.ArgumentParser(
-        description='dump global variables of a living process without interruption it',
+        description='dump global variables of a living process without interrupting it',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog)
     parser.add_argument('pid', type=int, help='target process ID')
@@ -798,17 +798,7 @@ if __name__ == '__main__':
                         help='maximum number of elements to display in an array')
     parser.add_argument('-s', '--string-max', type=int, default=0,
                         help='displayed maximum string length')
-    try:
-        args = parser.parse_args()
-    except SystemExit:
-        usage_str = parser.format_usage()
-        help_str = parser.format_help()
-        if help_str.startswith(usage_str) and len(help_str) > len(usage_str):
-            help_str = help_str[len(usage_str):]
-        else:
-            help_str = epilog
-        print(help_str)
-        raise
+    args = parser.parse_args()
 
     verbose = args.verbose
     array_max = args.array_max if args.array_max > 0 else 5
