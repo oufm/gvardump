@@ -367,7 +367,7 @@ class Parser(object):
                 "expect symbol, number or expression, but get '%s'" % token)
 
 
-def read_timeout(fp, timeout=1, size=1024*1024):
+def read_timeout(fp, timeout, size=1024*1024):
     r, _, _ = select.select([fp], [], [], timeout)
     if fp not in r:
         return b''
@@ -384,7 +384,7 @@ class GdbShell(object):
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, bufsize=1)
 
-        output, err = self._read_output()
+        output, err = self._read_output(timeout=3)
         if self.PROMPT not in output or err:
             raise Exception('gdb init failed, path: %s\n'
                             '----- stdout -----\n%s\n'
@@ -399,15 +399,14 @@ class GdbShell(object):
         gdb.kill()
         gdb.wait()
 
-    def _read_output(self):
-        output = read_timeout(self.gdb.stdout).decode()
+    def _read_output(self, timeout=1):
+        output = read_timeout(self.gdb.stdout, timeout).decode()
         output_all = ''
         while output:
             output_all += output
             if self.PROMPT in output:
                 break
-            output = read_timeout(self.gdb.stdout).decode()
-            # print("output: '%s'" % repr(output))
+            output = read_timeout(self.gdb.stdout, timeout).decode()
 
         err_str = read_timeout(self.gdb.stderr, 0).decode()
 
@@ -772,7 +771,7 @@ class Dumper(object):
 
 if __name__ == '__main__':
     epilog = """examples:
-    * type of g_var1 is 'struct foo**', dump the second struct:
+    * type of g_var1 is 'struct foo**', dump the third struct:
         %(prog)s 32311 '*g_var1[2]'
     * type of g_var2 is 'struct foo*', dump the first 5 elements:
         %(prog)s 32311 '(struct foo[5])*g_var2'
