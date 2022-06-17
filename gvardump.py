@@ -46,6 +46,26 @@ def log_exception():
                               file=sys.stderr)
 
 
+def cache_result(func):
+    @functools.wraps(func)
+    def _func(self, *args, **kwargs):
+        param_tuple = (tuple(args), frozenset(kwargs))
+        cache_name = '_%s_cache' % func.__name__
+        cache_dict = getattr(self, cache_name, {})
+        if not cache_dict:
+            setattr(self, cache_name, cache_dict)
+
+        cache_value = cache_dict.get(param_tuple, None)
+        if cache_value is not None:
+            return cache_value
+
+        cache_value = func(self, *args, **kwargs)
+        cache_dict[param_tuple] = cache_value
+        return cache_value
+
+    return _func
+
+
 class Token(object):
     pass
 
@@ -188,7 +208,7 @@ class Lexer(object):
             expect_name = expect_cls.__name__.upper()
             try:
                 expect_name = "'%s'" % str(expect_cls())
-            except:
+            except Exception:
                 pass
             raise Exception("expect %s at column %d, but get '%s' %s" %
                             (expect_name, self.pos + 1, token,
@@ -322,7 +342,7 @@ class Parser(object):
                         "typecast missing ')'")
                 term = self.parse_term()
                 return Typecast(term, str(symbol), ref_level, keyword, indexes)
-        except:
+        except Exception:
             pass
 
         # then try to parse without typecast
@@ -385,11 +405,12 @@ class GdbShell(object):
                                     stderr=subprocess.PIPE, bufsize=1)
 
         output, err = self._read_output(timeout=5)
-        if self.PROMPT not in output or err:
+        if self.PROMPT not in output:
             raise Exception('gdb init failed, path: %s\n'
                             '----- stdout -----\n%s\n'
                             '----- stderr -----\n%s' %
                             (elf_path, output, err))
+        self.run_cmd('print "hello"')
 
     def __del__(self):
         gdb = getattr(self, 'gdb', None)
@@ -412,6 +433,7 @@ class GdbShell(object):
 
         return output_all, err_str
 
+    @cache_result
     @log_arg_ret
     def run_cmd(self, cmd):
         self.gdb.stdin.write((cmd + '\n').encode())
@@ -467,6 +489,7 @@ class Dumper(object):
 
         return simplified_str
 
+    @cache_result
     @log_arg_ret
     def get_member_offset_and_type(self, type_str, member):
         # output = self.gdb_shell.run_cmd('ptype ' + type_str)
@@ -491,6 +514,7 @@ class Dumper(object):
             raise Exception("failed to get offset(%s, %s): %s" %
                             (type_str, member, str(e)))
 
+    @cache_result
     @log_arg_ret
     def get_symbol_address_and_type(self, symbol_str):
         try:
@@ -506,6 +530,7 @@ class Dumper(object):
             raise Exception("failed to get address of symbol '%s': %s" %
                             (symbol_str, str(e)))
 
+    @cache_result
     @log_arg_ret
     def get_type_size(self, type_str):
         try:
@@ -522,11 +547,12 @@ class Dumper(object):
         self.mem_fp.seek(address)
         try:
             data = self.mem_fp.read(self.arch_size)
-        except:
+        except Exception:
             raise Exception("read at address 0x%x failed" % address)
 
         return struct.unpack('P', data)[0]
 
+    @cache_result
     @log_arg_ret
     def derefrence_type(self, type_str):
         # remove a '(*)' or '[\d+]' or '*'
@@ -632,7 +658,7 @@ class Dumper(object):
                     str_val = str_val[:end]
                 if not re.search(r'[^\t-\r\x20-\x7e]', str_val):
                     return '"%s"' % (str_val + (omit_tip if end < 0 else ''))
-            except:
+            except Exception:
                 pass
 
         # dump as hex
@@ -701,7 +727,7 @@ class Dumper(object):
                 r'^\s*((\w+\s+)?\w+\s+\**)\s*(\w+)((\s*\[\d+\])*);', line)
             if not match or not match.group(3):
                 dump_txt += indent * self.BLANK + \
-                            "// can't recognize '%s'\n" % line.strip()
+                            "// parse definition '%s' failed\n" % line.strip()
             else:
                 # member_type = (match.group(1) + match.group(4)).strip()
                 member = match.group(3).strip()
@@ -712,7 +738,7 @@ class Dumper(object):
                     dump_txt += indent * self.BLANK + '.' + member + ' = ' + \
                         self.dump_type(data[offset: offset + member_size],
                                        member_type, indent) + ',\n'
-                except:
+                except Exception:
                     dump_txt += \
                         indent * self.BLANK + \
                         "// parse member '%s' of type '%s' failed\n" % \
@@ -763,7 +789,7 @@ class Dumper(object):
         self.mem_fp.seek(addr)
         try:
             data = self.mem_fp.read(type_size)
-        except:
+        except Exception:
             raise Exception("read memory 0x%x-0x%x failed" %
                             (addr, addr + type_size))
         return "%s = %s;" % (expr, self.dump_type(data, type_str, indent=0))
