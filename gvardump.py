@@ -384,7 +384,7 @@ class GdbShell(object):
                                     stdout=subprocess.PIPE,
                                     stderr=subprocess.PIPE, bufsize=1)
 
-        output, err = self._read_output(timeout=3)
+        output, err = self._read_output(timeout=5)
         if self.PROMPT not in output or err:
             raise Exception('gdb init failed, path: %s\n'
                             '----- stdout -----\n%s\n'
@@ -475,7 +475,7 @@ class Dumper(object):
         # match = re.match(pattern, output)
         # if not match or not match.group(1):
         #     raise Exception("type '%s' has no member '%s', ptype: %s" %
-        #                     type_str, member, output)
+        #                     (type_str, member, output))
         # member_type = match.group(1) + (match.group(4) if match.group(4) else '')
         try:
             output = self.gdb_shell.run_cmd('p &((%s *)0)->%s' %
@@ -534,7 +534,7 @@ class Dumper(object):
             return type_str.replace('(*)', '', 1).strip(), '(*)'
 
         # example: 'struct _43rdewd ** [43] [5]'
-        match = re.match(r'^(\w+\s+)?\w+\s*(\*)*\s*(\[\d+\])?', type_str)
+        match = re.match(r'^(\w+\s+)?\w+\s*(\*)*\s*(\[\d*\])?', type_str)
         if match:
             _, group2, group3 = match.groups()
             if group3:
@@ -542,7 +542,7 @@ class Dumper(object):
             elif group2:
                 return type_str.replace(group2, '', 1).strip(), group2
         raise Exception("type '%s' is neither array nor pointer, "
-                        "can't derefrence it", type_str)
+                        "can't derefrence it" % type_str)
 
     @log_arg_ret
     def get_addr_and_type(self, expr):
