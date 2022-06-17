@@ -1,8 +1,10 @@
 #!/usr/bin/env python
 from __future__ import print_function
+from datetime import datetime
 import os
 import re
 import sys
+import time
 import codecs
 import subprocess
 import argparse
@@ -11,6 +13,9 @@ import platform
 import struct
 import functools
 import traceback
+
+DEFAULT_ARRAY_MAX = 5
+DEFAULT_STRING_MAX = 64
 
 verbose = False
 log_nest_level = 0
@@ -458,7 +463,8 @@ class GdbShell(object):
 class Dumper(object):
     BLANK = '    '
 
-    def __init__(self, pid, array_max, string_max,
+    def __init__(self, pid,
+                 array_max=DEFAULT_ARRAY_MAX, string_max=DEFAULT_STRING_MAX,
                  array_max_force=False, string_max_force=False,
                  hex_string=False, elf_path=None):
         exe = os.readlink(
@@ -754,7 +760,7 @@ class Dumper(object):
         dump_txt += indent * self.BLANK + '}'
         return dump_txt
 
-    def dump_type(self, data, type_str, indent):
+    def dump_type(self, data, type_str, indent=0):
         if '(*)' in type_str:
             # dump pointer
             return '0x%x' % struct.unpack('P', data[:self.arch_size])[0]
@@ -786,7 +792,7 @@ class Dumper(object):
         # dump struct
         return self.dump_struct(data, type_str, ptype_lines, indent)
 
-    def dump(self, expr):
+    def get_data_and_type(self, expr):
         addr, type_str = self.get_addr_and_type(expr)
         if not type_str:
             raise Exception("type of '%s' is not specified" % expr)
@@ -798,19 +804,58 @@ class Dumper(object):
         except Exception:
             raise Exception("read memory 0x%x-0x%x failed" %
                             (addr, addr + type_size))
+        return data, type_str
+
+    def dump(self, expr):
+        data, type_str = self.get_data_and_type(expr)
         return "%s = %s;" % (expr, self.dump_type(data, type_str, indent=0))
 
 
-def do_dump(dumper, expression_list):
+def do_dump(dumper, expression_list, watch_interval=None):
+    expr_info = {}
     for expression in expression_list:
+        info = expr_info.setdefault(expression, {})
         try:
             lexer = Lexer(expression)
             parser = Parser(lexer)
-            expr = parser.parse()
-            print(dumper.dump(expr))
+            info['expr'] = parser.parse()
+            info['last_data'] = None
         except Exception as e:
             log_exception()
-            raise Exception("dump '%s' failed: %s" % (args.expression, str(e)))
+            raise Exception("parse '%s' failed: %s" % (expression, str(e)))
+
+    while True:
+        txt = ''
+        for info in expr_info.values():
+            try:
+                data, type_str = dumper.get_data_and_type(info['expr'])
+                if data != info['last_data']:
+                    txt += ("%s = %s;\n" %
+                          (info['expr'], dumper.dump_type(data, type_str)))
+                    info['last_data'] = data
+            except Exception as e:
+                log_exception()
+                if len(expression_list) == 1 and watch_interval is None:
+                    raise Exception("dump '%s' failed: %s" %
+                                    (info['expr'], str(e)))
+
+                if info['last_data'] != '':
+                    txt += ("Error: %s: %s\n" % (info['expr'], str(e)))
+                    info['last_data'] = ''
+
+        if watch_interval is None:
+            txt = txt.strip()
+            print(txt)
+            return
+
+        if not txt:
+            time.sleep(watch_interval)
+            continue
+
+        print('%s ------------------------' %
+              datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'))
+        print(txt)
+        time.sleep(watch_interval)
 
 
 if __name__ == '__main__':
@@ -823,6 +868,8 @@ if __name__ == '__main__':
         %(prog)s `pidof prog` 'g_var3->val.data'
     * there is a 'struct foo' at address 0x556159b32020, dump it:
         %(prog)s `pidof prog` '(struct foo)0x556159b32020'
+    * check the expression values every 0.1s, dump them when the values change:
+        %(prog)s -w 0.1 `pidof prog` '*g_var1[2]' '(struct foo[5])*g_var2'
     """ % {'prog': sys.argv[0]}
     parser = argparse.ArgumentParser(
         description='dump global variables of a living process without interrupting it',
@@ -839,14 +886,17 @@ if __name__ == '__main__':
                         help='elf path to read symbols, '
                              '`readlink /proc/$pid/exe` by default')
     parser.add_argument('-a', '--array-max', type=int, default=0,
-                        help='maximum number of elements to display in an array')
+                        help='maximum number of array elements to display')
     parser.add_argument('-s', '--string-max', type=int, default=0,
-                        help='displayed maximum string length')
+                        help='maximum string length to display')
+    parser.add_argument('-w', '--watch-interval', type=float,
+                        help='check the expression value every WATCH_INTERVAL '
+                             'seconds and dump it when it changes')
     args = parser.parse_args()
 
     verbose = args.verbose
-    array_max = args.array_max if args.array_max > 0 else 5
-    string_max = args.string_max if args.string_max > 0 else 64
+    array_max = args.array_max if args.array_max > 0 else DEFAULT_ARRAY_MAX
+    string_max = args.string_max if args.string_max > 0 else DEFAULT_STRING_MAX
     array_max_force = bool(args.array_max > 0)
     string_max_force = bool(args.string_max > 0)
 
@@ -855,9 +905,9 @@ if __name__ == '__main__':
                         array_max=array_max, array_max_force=array_max_force,
                         hex_string=args.hex_string, string_max=string_max,
                         string_max_force=string_max_force)
-        do_dump(dumper, args.expression)
+        do_dump(dumper, args.expression, args.watch_interval)
     except Exception as e:
         print("Error: %s" % str(e), file=sys.stderr)
         if verbose:
             raise
-        exit(-1)
+        exit(1)
