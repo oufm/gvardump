@@ -704,7 +704,7 @@ class Dumper(object):
         return dump_txt
 
     def dump_basic_type(self, data, type_desc):
-        if 'char' in type_desc:
+        if 'char' in type_desc or '_Bool' in type_desc:
             if 'unsigned' in type_desc:
                 return str(struct.unpack('B', data[0])[0])
             else:
