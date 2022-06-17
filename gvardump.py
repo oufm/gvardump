@@ -13,15 +13,20 @@ import functools
 import traceback
 
 verbose = False
+log_nest_level = 0
 
 
 def log_arg_ret(func):
     @functools.wraps(func)
     def _func(*args, **kwargs):
+        global log_nest_level
         ret = 'Error'
+        log_nest_level += 1
+
         try:
             ret = func(*args, **kwargs)
         finally:
+            log_nest_level -= 1
             if verbose:
                 args = args[1:]
                 arg_str1 = ', '.join([str(i) for i in args])
@@ -31,7 +36,8 @@ def log_arg_ret(func):
                     arg_str = arg_str1 + ', ' + arg_str2
                 else:
                     arg_str = arg_str1 + arg_str2
-                print("call: %s(%s) = '%s'" % (func.__name__, arg_str, ret),
+                print("call[%d]: %s(%s) = '%s'" %
+                      (log_nest_level, func.__name__, arg_str, ret),
                       file=sys.stderr)
         return ret
 
@@ -795,23 +801,36 @@ class Dumper(object):
         return "%s = %s;" % (expr, self.dump_type(data, type_str, indent=0))
 
 
+def do_dump(dumper, expression_list):
+    for expression in expression_list:
+        try:
+            lexer = Lexer(expression)
+            parser = Parser(lexer)
+            expr = parser.parse()
+            print(dumper.dump(expr))
+        except Exception as e:
+            log_exception()
+            raise Exception("dump '%s' failed: %s" % (args.expression, str(e)))
+
+
 if __name__ == '__main__':
     epilog = """examples:
     * type of g_var1 is 'struct foo**', dump the third struct:
-        %(prog)s 32311 '*g_var1[2]'
+        %(prog)s `pidof prog` '*g_var1[2]'
     * type of g_var2 is 'struct foo*', dump the first 5 elements:
-        %(prog)s 32311 '(struct foo[5])*g_var2'
+        %(prog)s `pidof prog` '(struct foo[5])*g_var2'
     * g_var3 points to a nested struct, dump the member:
-        %(prog)s 32311 'g_var3->val.data'
+        %(prog)s `pidof prog` 'g_var3->val.data'
     * there is a 'struct foo' at address 0x556159b32020, dump it:
-        %(prog)s 32311 '(struct foo)0x556159b32020'
+        %(prog)s `pidof prog` '(struct foo)0x556159b32020'
     """ % {'prog': sys.argv[0]}
     parser = argparse.ArgumentParser(
         description='dump global variables of a living process without interrupting it',
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=epilog)
     parser.add_argument('pid', type=int, help='target process ID')
-    parser.add_argument('expression', type=str, help='a C rvalue expression')
+    parser.add_argument('expression', type=str, nargs='+',
+                        help='rvalue expression in C style')
     parser.add_argument('-v', '--verbose', action='store_true',
                         help='show debug information')
     parser.add_argument('-x', '--hex-string', action='store_true',
@@ -832,18 +851,13 @@ if __name__ == '__main__':
     string_max_force = bool(args.string_max > 0)
 
     try:
-        lexer = Lexer(args.expression)
-        parser = Parser(lexer)
-        expr = parser.parse()
         dumper = Dumper(pid=args.pid, elf_path=args.elf_path,
                         array_max=array_max, array_max_force=array_max_force,
                         hex_string=args.hex_string, string_max=string_max,
                         string_max_force=string_max_force)
-        print(dumper.dump(expr))
+        do_dump(dumper, args.expression)
     except Exception as e:
+        print("Error: %s" % str(e), file=sys.stderr)
         if verbose:
             raise
-
-        print("dump '%s' failed: %s" % (args.expression, str(e)),
-              file=sys.stderr)
         exit(-1)
