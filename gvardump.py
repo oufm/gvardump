@@ -67,11 +67,20 @@ def cache_result(func):
             setattr(self, cache_name, cache_dict)
 
         cache_value = cache_dict.get(param_tuple, None)
+        if isinstance(cache_value, Exception):
+            raise cache_value
+
         if cache_value is not None:
             return cache_value
 
-        cache_value = func(self, *args, **kwargs)
-        cache_dict[param_tuple] = cache_value
+        try:
+            cache_value = func(self, *args, **kwargs)
+        except Exception as e:
+            log_exception()
+            cache_dict[param_tuple] = e
+            raise e
+        else:
+            cache_dict[param_tuple] = cache_value
         return cache_value
 
     return _func
