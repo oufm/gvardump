@@ -520,12 +520,19 @@ class Dumper(object):
         if platform.architecture()[0] == '32bit':
             self.arch_size = 4
 
+    @log_arg_ret
     def simplify_type(self, type_str):
         simplified_str = type_str.strip()
         if simplified_str[0] == '(':
             if simplified_str[-1] != ')':
                 raise Exception("parentheses not enclosed: '%s'" % type_str)
-            return simplified_str[1:-1]
+            simplified_str = simplified_str[1:-1]
+
+        match = re.match(r'^\s*(static\s|const\s)+', simplified_str)
+        if match:
+            group1, = match.groups()
+            if group1:
+                simplified_str = simplified_str.replace(group1, '')
 
         return simplified_str
 
@@ -548,7 +555,7 @@ class Dumper(object):
             member_type = self.simplify_type(output[pos1 + 1:pos2])
             offset_str = output[pos2:].strip().split()[0]
             member_offset = int(offset_str, 0)
-            return member_offset, self.derefrence_type(member_type)[0]
+            return member_offset, self.dereference_type(member_type)[0]
         except Exception as e:
             append_err_txt(e, "failed to get offset(%s, %s): " %
                            (type_str, member))
@@ -564,7 +571,7 @@ class Dumper(object):
             symbol_type = self.simplify_type(output[pos1 + 1:pos2])
             symbol_offset = int(output[pos2:].strip().split()[0], 0)
             return symbol_offset + self.base_addr, \
-                self.derefrence_type(symbol_type)[0]
+                self.dereference_type(symbol_type)[0]
         except Exception as e:
             append_err_txt(e, "failed to get address of symbol '%s': " %
                            symbol_str)
@@ -593,7 +600,7 @@ class Dumper(object):
 
     @cache_result
     @log_arg_ret
-    def derefrence_type(self, type_str):
+    def dereference_type(self, type_str):
         # remove a '(*)' or '[\d+]' or '*'
         if '(*)' in type_str:
             return type_str.replace('(*)', '', 1).strip(), '(*)'
@@ -607,7 +614,7 @@ class Dumper(object):
             elif group2:
                 return type_str.replace(group2, '', 1).strip(), group2
         raise Exception("type '%s' is neither array nor pointer, "
-                        "can't derefrence it" % type_str)
+                        "can't dereference it" % type_str)
 
     @log_arg_ret
     def get_addr_and_type(self, expr):
@@ -651,7 +658,7 @@ class Dumper(object):
                     raise Exception("type of '%s' is '%s', not a pointer, "
                                     "'*' is not allowed" %
                                     (expr.variable, type_str))
-            type_str = self.derefrence_type(type_str)[0]
+            type_str = self.dereference_type(type_str)[0]
             addr = self.dereference_addr(addr)
             offset = 0
             if expr.member:
@@ -668,7 +675,7 @@ class Dumper(object):
                 raise Exception("type of '%s' is '%s', neither pointer "
                                 "nor array, index is not allowed" %
                                 (expr.variable, type_str))
-            type_str, popped = self.derefrence_type(type_str)
+            type_str, popped = self.dereference_type(type_str)
             if '*' in popped:
                 # index a pointer instead of array
                 addr = self.dereference_addr(addr)
@@ -761,6 +768,7 @@ class Dumper(object):
             if not line or '{' in line or '}' in line:
                 continue
 
+            line = self.simplify_type(line)
             # example: '  struct _43rdewd *foo [43] [5];'
             match = re.match(
                 r'^\s*((\w+\s+)?\w+\s+\**)\s*(\w+)((\s*\[\d+\])*);', line)
