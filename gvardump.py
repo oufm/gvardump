@@ -846,21 +846,23 @@ class Dumper(object):
 
 
 def do_dump(dumper, expression_list, watch_interval=None):
-    expr_info = {}
+    expr_list = []
     for expression in expression_list:
-        info = expr_info.setdefault(expression, {})
         try:
             lexer = Lexer(expression)
             parser = Parser(lexer)
-            info['expr'] = parser.parse()
-            info['last_data'] = None
+            info = {
+                'expr': parser.parse(),
+                'last_data': None,
+            }
+            expr_list.append(info)
         except Exception as e:
             append_err_txt(e, "parse '%s' failed: " % expression)
             reraise()
 
     while True:
         txt = ''
-        for info in expr_info.values():
+        for info in expr_list:
             try:
                 data, type_str = dumper.get_data_and_type(info['expr'])
                 if data != info['last_data']:
