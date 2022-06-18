@@ -5,6 +5,7 @@ import os
 import re
 import sys
 import time
+import copy
 import codecs
 import subprocess
 import argparse
@@ -19,6 +20,33 @@ DEFAULT_STRING_MAX = 64
 
 verbose = False
 log_nest_level = 0
+
+
+if sys.version_info[0] >= 3:
+    def reraise():
+        exc_info = sys.exc_info()
+        raise exc_info[1].with_traceback(exc_info[2])
+else:
+    exec("def reraise():\n"
+         "    exc_info = sys.exc_info()\n"
+         "    raise exc_info[0], exc_info[1], exc_info[2]\n")
+
+
+def get_err_txt(err):
+    return getattr(err, "show_txt", str(err))
+
+
+def append_err_txt(err, txt_before='', txt_after=''):
+    err.show_txt = "%s%s%s" % (txt_before, get_err_txt(err), txt_after)
+
+
+def log_exception():
+    if not verbose:
+        return
+    exc_type, exc_value, exc_traceback = sys.exc_info()
+    print("Error: %s" % get_err_txt(exc_value), file=sys.stderr)
+    traceback.print_exception(exc_type, exc_value, exc_traceback,
+                              file=sys.stderr)
 
 
 def log_arg_ret(func):
@@ -49,14 +77,6 @@ def log_arg_ret(func):
     return _func
 
 
-def log_exception():
-    if not verbose:
-        return
-    exc_type, exc_value, exc_traceback = sys.exc_info()
-    traceback.print_exception(exc_type, exc_value, exc_traceback,
-                              file=sys.stderr)
-
-
 def cache_result(func):
     @functools.wraps(func)
     def _func(self, *args, **kwargs):
@@ -66,7 +86,7 @@ def cache_result(func):
         if not cache_dict:
             setattr(self, cache_name, cache_dict)
 
-        cache_value = cache_dict.get(param_tuple, None)
+        cache_value = copy.deepcopy(cache_dict.get(param_tuple, None))
         if isinstance(cache_value, Exception):
             raise cache_value
 
@@ -76,11 +96,10 @@ def cache_result(func):
         try:
             cache_value = func(self, *args, **kwargs)
         except Exception as e:
-            log_exception()
-            cache_dict[param_tuple] = e
-            raise e
+            cache_dict[param_tuple] = copy.deepcopy(e)
+            reraise()
         else:
-            cache_dict[param_tuple] = cache_value
+            cache_dict[param_tuple] = copy.deepcopy(cache_value)
         return cache_value
 
     return _func
@@ -531,9 +550,9 @@ class Dumper(object):
             member_offset = int(offset_str, 0)
             return member_offset, self.derefrence_type(member_type)[0]
         except Exception as e:
-            log_exception()
-            raise Exception("failed to get offset(%s, %s): %s" %
-                            (type_str, member, str(e)))
+            append_err_txt(e, "failed to get offset(%s, %s): " %
+                           (type_str, member))
+            reraise()
 
     @cache_result
     @log_arg_ret
@@ -547,9 +566,9 @@ class Dumper(object):
             return symbol_offset + self.base_addr, \
                 self.derefrence_type(symbol_type)[0]
         except Exception as e:
-            log_exception()
-            raise Exception("failed to get address of symbol '%s': %s" %
-                            (symbol_str, str(e)))
+            append_err_txt(e, "failed to get address of symbol '%s': " %
+                           symbol_str)
+            reraise()
 
     @cache_result
     @log_arg_ret
@@ -559,9 +578,8 @@ class Dumper(object):
             pos = output.index('=')
             return int(output[pos + 1:].strip().split()[0], 0)
         except Exception as e:
-            log_exception()
-            raise Exception("failed to get size of '%s': %s" %
-                            (type_str, str(e)))
+            append_err_txt(e, "failed to get size of '%s': " % type_str)
+            reraise()
 
     @log_arg_ret
     def dereference_addr(self, address):
@@ -790,9 +808,8 @@ class Dumper(object):
             pos = ptype.index('=')
             ptype_lines = ptype[pos + 1:].strip().splitlines()
         except Exception as e:
-            log_exception()
-            raise Exception("failed to get type of '%s': %s" %
-                            (type_str, str(e)))
+            append_err_txt(e, "failed to get type of '%s': " % type_str)
+            reraise()
 
         if len(ptype_lines) == 1:
             # dump basic type
@@ -830,8 +847,8 @@ def do_dump(dumper, expression_list, watch_interval=None):
             info['expr'] = parser.parse()
             info['last_data'] = None
         except Exception as e:
-            log_exception()
-            raise Exception("parse '%s' failed: %s" % (expression, str(e)))
+            append_err_txt(e, "parse '%s' failed: " % expression)
+            reraise()
 
     while True:
         txt = ''
@@ -843,13 +860,14 @@ def do_dump(dumper, expression_list, watch_interval=None):
                           (info['expr'], dumper.dump_type(data, type_str)))
                     info['last_data'] = data
             except Exception as e:
-                log_exception()
                 if len(expression_list) == 1 and watch_interval is None:
-                    raise Exception("dump '%s' failed: %s" %
-                                    (info['expr'], str(e)))
+                    append_err_txt(e, "dump '%s' failed: " % info['expr'])
+                    reraise()
+                else:
+                    log_exception()
 
                 if info['last_data'] != '':
-                    txt += ("Error: %s: %s\n" % (info['expr'], str(e)))
+                    txt += ("Error: %s: %s\n" % (info['expr'], get_err_txt(e)))
                     info['last_data'] = ''
 
         if watch_interval is None:
@@ -916,7 +934,7 @@ if __name__ == '__main__':
                         string_max_force=string_max_force)
         do_dump(dumper, args.expression, args.watch_interval)
     except Exception as e:
-        print("Error: %s" % str(e), file=sys.stderr)
+        print("Error: %s" % get_err_txt(e), file=sys.stderr)
         if verbose:
-            raise
+            reraise()
         exit(1)
