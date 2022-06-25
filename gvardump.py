@@ -892,6 +892,7 @@ def do_dump(dumper, expression_list, watch_interval=None):
         print('%s ------------------------' %
               datetime.now().strftime('%Y-%m-%d %H:%M:%S.%f'))
         print(txt)
+        sys.stdout.flush()
         time.sleep(watch_interval)
 
 
