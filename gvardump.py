@@ -515,6 +515,10 @@ class Dumper(object):
         maps = open(os.path.join('/proc', str(pid), 'maps')).read()
         self.base_addr = int([line for line in maps.splitlines()
                               if exe in line][0].split('-')[0], base=16)
+        # for non-PIE executable, see: https://stackoverflow.com/a/73189318/18251455
+        if self.base_addr == 0x400000:
+            self.base_addr = 0
+
         self.gdb_shell = GdbShell(self.elf_path)
         self.arch_size = 8
         if platform.architecture()[0] == '32bit':
